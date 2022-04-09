@@ -80,14 +80,23 @@ class IMDBModel(nn.Module):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_parameters = [
             {
-                "params": [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
+                "params": [
+                    p
+                    for n, p in param_optimizer
+                    if all(nd not in n for nd in no_decay)
+                ],
                 "weight_decay": 0.001,
             },
             {
-                "params": [p for n, p in param_optimizer if any(nd in n for nd in no_decay)],
+                "params": [
+                    p
+                    for n, p in param_optimizer
+                    if any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": 0.0,
             },
         ]
+
         opt = torch.optim.AdamW(optimizer_parameters, lr=self.learning_rate)
         sch = get_linear_schedule_with_warmup(
             opt,
