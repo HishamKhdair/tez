@@ -16,11 +16,7 @@ class EarlyStopping(Callback):
         self.delta = delta
         self.save_weights_only = save_weights_only
         self.model_path = model_path
-        if self.mode == "min":
-            self.val_score = np.Inf
-        else:
-            self.val_score = -np.Inf
-
+        self.val_score = np.Inf if self.mode == "min" else -np.Inf
         if self.monitor.startswith("train_"):
             self.model_state = "train"
             self.monitor_value = self.monitor[len("train_") :]
@@ -32,11 +28,7 @@ class EarlyStopping(Callback):
 
     def check(self, tez_trainer):
         epoch_score = tez_trainer.metrics[self.model_state][self.monitor_value]
-        if self.mode == "min":
-            score = -1.0 * epoch_score
-        else:
-            score = np.copy(epoch_score)
-
+        score = -1.0 * epoch_score if self.mode == "min" else np.copy(epoch_score)
         if self.best_score is None:
             self.best_score = score
             self.save_checkpoint(epoch_score, tez_trainer)

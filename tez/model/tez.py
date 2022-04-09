@@ -37,14 +37,11 @@ class Tez:
         self._model_state = None
         self._train_state = None
         self.metrics_meter = None
-        self.metrics = {}
-        self.metrics["train"] = {}
-        self.metrics["valid"] = {}
-        self.metrics["test"] = {}
+        self.metrics = {"train": {}, "valid": {}, "test": {}}
 
     def _configure_model(self):
         local_rank = int(os.environ.get("LOCAL_RANK", -1))
-        if local_rank != -1 and local_rank != self.local_rank:
+        if local_rank not in [-1, self.local_rank]:
             self.local_rank = local_rank
 
         if self.config.device == "cpu":
@@ -153,18 +150,17 @@ class Tez:
                 pin_memory=self.config.pin_memory,
             )
 
-        if self.valid_loader is None:
-            if self.valid_dataset is not None:
-                self.valid_loader = DataLoader(
-                    self.valid_dataset,
-                    batch_size=self.config.validation_batch_size,
-                    num_workers=self.config.num_jobs,
-                    sampler=self.valid_sampler,
-                    shuffle=self.config.valid_shuffle,
-                    collate_fn=self.valid_collate_fn,
-                    drop_last=self.config.valid_drop_last,
-                    pin_memory=self.config.pin_memory,
-                )
+        if self.valid_loader is None and self.valid_dataset is not None:
+            self.valid_loader = DataLoader(
+                self.valid_dataset,
+                batch_size=self.config.validation_batch_size,
+                num_workers=self.config.num_jobs,
+                sampler=self.valid_sampler,
+                shuffle=self.config.valid_shuffle,
+                collate_fn=self.valid_collate_fn,
+                drop_last=self.config.valid_drop_last,
+                pin_memory=self.config.pin_memory,
+            )
 
         self.optimizer, self.scheduler = self.model.optimizer_scheduler()
 
@@ -178,12 +174,11 @@ class Tez:
         if self.optimizer is None:
             raise Exception("No optimizer found")
 
-        if self.local_rank != -1:
-            if torch.distributed.get_rank() == 0:
-                logger.info(f"\n{self.config}")
-                if self.scheduler is None:
-                    logger.warning("No scheduler found. Continuing without scheduler")
-        else:
+        if (
+            self.local_rank != -1
+            and torch.distributed.get_rank() == 0
+            or self.local_rank == -1
+        ):
             logger.info(f"\n{self.config}")
             if self.scheduler is None:
                 logger.warning("No scheduler found. Continuing without scheduler")
@@ -217,12 +212,12 @@ class Tez:
     @train_state.setter
     def train_state(self, value):
         self._train_state = value
-        if self._callback_runner is not None:
-            if self.local_rank != -1:
-                if torch.distributed.get_rank() == 0:
-                    self._callback_runner(value)
-            else:
-                self._callback_runner(value)
+        if self._callback_runner is not None and (
+            self.local_rank != -1
+            and torch.distributed.get_rank() == 0
+            or self.local_rank == -1
+        ):
+            self._callback_runner(value)
 
     def name_to_metric(self, metric_name):
         if metric_name == "current_epoch":
@@ -261,11 +256,12 @@ class Tez:
         else:
             sch_state_dict = None
 
-        model_dict = {}
-        model_dict["state_dict"] = model_state_dict
-        model_dict["optimizer"] = opt_state_dict
-        model_dict["scheduler"] = sch_state_dict
-        model_dict["config"] = self.config
+        model_dict = {
+            "state_dict": model_state_dict,
+            "optimizer": opt_state_dict,
+            "scheduler": sch_state_dict,
+            "config": self.config,
+        }
 
         if self.local_rank != -1 and self.num_gpu > 1:
             if torch.distributed.get_rank() == 0:
@@ -325,13 +321,15 @@ class Tez:
             else:
                 self.optimizer.step()
 
-            if self.scheduler is not None:
-                if self.config.step_scheduler_after == "batch":
-                    if self.config.step_scheduler_metric is None:
-                        self.scheduler.step()
-                    else:
-                        step_metric = self.name_to_metric(self.config.step_scheduler_metric)
-                        self.scheduler.step(step_metric)
+            if (
+                self.scheduler is not None
+                and self.config.step_scheduler_after == "batch"
+            ):
+                if self.config.step_scheduler_metric is None:
+                    self.scheduler.step()
+                else:
+                    step_metric = self.name_to_metric(self.config.step_scheduler_metric)
+                    self.scheduler.step(step_metric)
 
             self.model.zero_grad()
 
@@ -399,9 +397,12 @@ class Tez:
             loss, metrics = self.train_step(data)
             losses, monitor = self._update_loss_metrics(losses, loss, metrics, data_loader)
             self.train_state = enums.TrainingState.TRAIN_STEP_END
-            if self.valid_loader and self.config.val_strategy == "batch":
-                if self.current_train_step % self.config.val_steps == 0:
-                    self.validate(self.valid_loader)
+            if (
+                self.valid_loader
+                and self.config.val_strategy == "batch"
+                and self.current_train_step % self.config.val_steps == 0
+            ):
+                self.validate(self.valid_loader)
         self._set_training_epoch_end(losses, monitor)
 
     def _set_validation_epoch_start(self, data_loader):
@@ -432,13 +433,15 @@ class Tez:
             self._set_training_state()
 
     def _step_scheduler_after_epoch(self):
-        if self.scheduler is not None:
-            if self.config.step_scheduler_after == "epoch":
-                if self.config.step_scheduler_metric is None:
-                    self.scheduler.step()
-                else:
-                    step_metric = self.name_to_metric(self.config.step_scheduler_metric)
-                    self.scheduler.step(step_metric)
+        if (
+            self.scheduler is not None
+            and self.config.step_scheduler_after == "epoch"
+        ):
+            if self.config.step_scheduler_metric is None:
+                self.scheduler.step()
+            else:
+                step_metric = self.name_to_metric(self.config.step_scheduler_metric)
+                self.scheduler.step(step_metric)
 
     def fit(self, train_dataset, valid_dataset=None, config: TezConfig = None, **kwargs):
         if config is None:
@@ -467,26 +470,14 @@ class Tez:
 
     def predict(self, dataset, **kwargs):
 
-        if "sampler" in kwargs:
-            sampler = kwargs["sampler"]
-        else:
-            sampler = None
-
-        if "collate_fn" in kwargs:
-            collate_fn = kwargs["collate_fn"]
-        else:
-            collate_fn = None
-
+        sampler = kwargs["sampler"] if "sampler" in kwargs else None
+        collate_fn = kwargs["collate_fn"] if "collate_fn" in kwargs else None
         if "batch_size" in kwargs:
             batch_size = kwargs["batch_size"]
         else:
             batch_size = self.config.test_batch_size
 
-        if "num_jobs" in kwargs:
-            num_jobs = kwargs["num_jobs"]
-        else:
-            num_jobs = self.config.num_jobs
-
+        num_jobs = kwargs["num_jobs"] if "num_jobs" in kwargs else self.config.num_jobs
         if "pin_memory" in kwargs:
             pin_memory = kwargs["pin_memory"]
         else:
@@ -515,5 +506,4 @@ class Tez:
         for data in data_loader:
             with torch.no_grad():
                 out, _, _ = self.model_fn(data)
-                out = self.process_output(out)
-                yield out
+                yield self.process_output(out)
